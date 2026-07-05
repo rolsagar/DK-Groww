@@ -38,8 +38,8 @@ WEAK_RSI = 40
 
 # Default watchlist -> (NSE ticker, Display name)
 DEFAULT_WATCHLIST = [
-    ("ADANIENT.NS", "ADANIENT"),
-   ("GAIL.NS", "GAIL"),
+ ("ADANIENT.NS", "ADANIENT"),
+ ("GAIL.NS", "GAIL"),
 ("HDFCBANK.NS", "HDFCBANK"),
 ("ICICIBANK.NS", "ICICIBANK"),
 ("IOC.NS", "IOC"),
