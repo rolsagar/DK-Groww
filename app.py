@@ -1,244 +1,569 @@
 """
-DK Groww — RSI + MACD Technical Dashboard
-A Streamlit dashboard that replicates the classic RSI-MACD stock analysis
-layout, tracking a fixed watchlist of NSE-listed stocks/ETFs with the
-option to type in any custom ticker.
+My HDFC Stocks — RSI + MACD Dashboard
+=====================================
+A Streamlit dashboard that mirrors the reference design:
+ - "Fully Bullish" and "Weak / Oversold" highlight cards
+ - A detailed table (Daily / Weekly / Monthly rows per stock) showing
+   RSI (Wilder's, 14) with a colored bar, MACD(12,26,9) position,
+   % of 52-week high, and volume.
+
+Data source: yfinance (free, delayed ~15 min for NSE symbols).
+
+Run with:
+    streamlit run app.py
 """
+
+import datetime as dt
+import re
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
+
+from stock_utils import IST, RSI_PERIOD, fetch_daily, macd_lines, resample_ohlc, rsi_wilder
 
 # --------------------------------------------------------------------------
-# Page config
+# CONFIG
 # --------------------------------------------------------------------------
+
 st.set_page_config(
-    page_title="DK Groww",
+    page_title="My HDFC Stocks — RSI + MACD Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
+BULLISH_RSI = 60
+WEAK_RSI = 40
+
+# Default watchlist -> (NSE ticker, Display name)
+DEFAULT_WATCHLIST = [
+    ("ADANIENT.NS", "ADANIENT"),
+    ("ABSLAMC.NS", "ABSLAMC"),
+    ("DMART.NS", "DMART"),
+    ("GOLDAXIS.NS", "GOLDAXIS"),
+    ("BAJAJ-AUTO.NS", "BAJAJ AUTO"),
+    ("BAJAJFINSV.NS", "BAJAJFINSV"),
+    ("BAJAJHFL.NS", "BAJAJHFL"),
+    ("BANKBARODA.NS", "BANKBARODA"),
+    ("BHEL.NS", "BHEL"),
+    ("BHARTIARTL.NS", "BHARTIARTL"),
+    ("CIPLA.NS", "CIPLA"),
+    ("COALINDIA.NS", "COALINDIA"),
+    ("CUMMINSIND.NS", "CUMMINSIND"),
+    ("DELHIVERY.NS", "DELHIVERY"),
+    ("ETERNAL.NS", "ETERNAL"),
+    ("GLENMARK.NS", "GLENMARK"),
+    ("GODREJPROP.NS", "GODREJPROP"),
+    ("HDFCBANK.NS", "HDFCBANK"),
+    ("HDFCGOLD.NS", "HDFCGOLD"),
+    ("HDFCLIFE.NS", "HDFCLIFE"),
+    ("HINDALCO.NS", "HINDALCO"),
+    ("HINDCOPPER.NS", "HINDCOPPER"),
+    ("HINDUNILVR.NS", "HINDUNILVR"),
+    ("ICICIBANK.NS", "ICICIBANK"),
+    ("ICICIGI.NS", "ICICIGI"),
+    ("IOC.NS", "IOC"),
+    ("INDUSINDBK.NS", "INDUSINDBK"),
+    ("INFY.NS", "INFY"),
+    ("INDIGO.NS", "INDIGO"),
+    ("ITCHOTELS.NS", "ITCHOTELS"),
+    ("ITC.NS", "ITC"),
+    ("JIOFIN.NS", "JIOFIN"),
+    ("JSWSTEEL.NS", "JSWSTEEL"),
+    ("KSB.NS", "KSB"),
+    ("KWIL.NS", "KWIL"),
+    ("LT.NS", "LT"),
+    ("LICI.NS", "LICI"),
+    ("MARUTI.NS", "MARUTI"),
+    ("MAZDOCK.NS", "MAZDOCK"),
+    ("NESTLEIND.NS", "NESTLEIND"),
+    ("NTPC.NS", "NTPC"),
+    ("GOLDBEES.NS", "GOLDBEES"),
+    ("ONGC.NS", "ONGC"),
+    ("RALLIS.NS", "RALLIS"),
+    ("RELIANCE.NS", "RELIANCE"),
+    ("RPOWER.NS", "RPOWER"),
+    ("SBICARD.NS", "SBICARD"),
+    ("SBIN.NS", "SBIN"),
+    ("SWIGGY.NS", "SWIGGY"),
+    ("TCS.NS", "TCS"),
+    ("TATAELXSI.NS", "TATAELXSI"),
+    ("TMCV.NS", "TMCV"),
+    ("TMPV.NS", "TMPV"),
+    ("TATASTEEL.NS", "TATASTEEL"),
+    ("TITAN.NS", "TITAN"),
+    ("TRENT.NS", "TRENT"),
+    ("VGUARD.NS", "VGUARD"),
+    ("YESBANK.NS", "YESBANK"),
+]
+
+# NOTE: rsi_wilder, macd_lines, fetch_daily, and resample_ohlc now live in
+# stock_utils.py (imported above) so this dashboard and the chart page in
+# pages/1_Chart_View.py always use identical indicator math.
+
+
+def analyze_ticker(ticker: str, display_name: str) -> dict | None:
+    daily = fetch_daily(ticker)
+    if daily.empty or len(daily) < 60:
+        return None
+
+    weekly = resample_ohlc(daily, "W-FRI")
+    monthly = resample_ohlc(daily, "ME")
+
+    frames = {"Daily": daily, "Weekly": weekly, "Monthly": monthly}
+    tf_data = {}
+    for tf_name, frame in frames.items():
+        if len(frame) < RSI_PERIOD + 2:
+            tf_data[tf_name] = {"rsi": np.nan, "macd_above": None}
+            continue
+        rsi = rsi_wilder(frame["Close"]).iloc[-1]
+        macd_line, signal_line = macd_lines(frame["Close"])
+        macd_above = bool(macd_line.iloc[-1] > signal_line.iloc[-1])
+        tf_data[tf_name] = {"rsi": round(float(rsi), 2), "macd_above": macd_above}
+
+    current_price = float(daily["Close"].iloc[-1])
+    prev_close = float(daily["Close"].iloc[-2]) if len(daily) >= 2 else current_price
+    day_change_pct = round(((current_price - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+    day_change_abs = round(current_price - prev_close, 2)
+    lookback = daily.tail(252)  # ~1 trading year
+    high_52w = float(lookback["High"].max())
+    low_52w = float(lookback["Low"].min())
+    pct_of_high = round((current_price / high_52w) * 100, 0) if high_52w else np.nan
+
+    latest_volume = float(daily["Volume"].iloc[-1])
+    avg_volume_20 = float(daily["Volume"].tail(20).mean())
+    vol_ratio = round((latest_volume / avg_volume_20) * 100, 0) if avg_volume_20 else np.nan
+
+    return {
+        "ticker": ticker,
+        "name": display_name,
+        "price": current_price,
+        "day_change_pct": day_change_pct,
+        "day_change_abs": day_change_abs,
+        "high_52w": high_52w,
+        "low_52w": low_52w,
+        "pct_of_high": pct_of_high,
+        "tf": tf_data,
+        "latest_volume": latest_volume,
+        "avg_volume_20": avg_volume_20,
+        "vol_ratio": vol_ratio,
+    }
+
+
+def classify(stock: dict) -> str:
+    """Returns 'bullish', 'watch', 'weak', or 'neutral'."""
+    tf = stock["tf"]
+    if any(tf[t]["rsi"] is None or np.isnan(tf[t]["rsi"]) for t in tf):
+        return "neutral"
+
+    bull_flags = [tf[t]["rsi"] > BULLISH_RSI and tf[t]["macd_above"] for t in ["Daily", "Weekly", "Monthly"]]
+
+    if all(bull_flags):
+        return "bullish"
+
+    wm_bull = (
+        tf["Weekly"]["rsi"] > BULLISH_RSI
+        and tf["Weekly"]["macd_above"]
+        and tf["Monthly"]["rsi"] > BULLISH_RSI
+        and tf["Monthly"]["macd_above"]
+    )
+    if wm_bull:
+        return "watch"
+
+    if tf["Daily"]["rsi"] < WEAK_RSI and not tf["Daily"]["macd_above"]:
+        return "weak"
+
+    return "neutral"
+
+
 # --------------------------------------------------------------------------
-# Watchlist — name shown to the user -> Yahoo Finance / NSE ticker
+# HTML / CSS RENDERING  (built to visually match the reference image)
 # --------------------------------------------------------------------------
-WATCHLIST = {
-    "GAIL (INDIA) LTD": "GAIL.NS",
-    "HDFC BANK LTD": "HDFCBANK.NS",
-    "ICICI BANK LTD.": "ICICIBANK.NS",
-    "INDIAN OIL CORP LTD": "IOC.NS",
-    "INTERGLOBE AVIATION LTD": "INDIGO.NS",
-    "ITC LTD": "ITC.NS",
-    "LARSEN & TOUBRO LTD.": "LT.NS",
-    "MOTILAL OS NASDAQ100 ETF": "MON100.NS",
-    "NIP IND ETF GOLD BEES": "GOLDBEES.NS",
-    "RELIANCE INDUSTRIES LTD": "RELIANCE.NS",
-    "SBIAMC - SBISILVER": "SBISILVER.NS",
-    "TATA CONSUMER PRODUCT LTD": "TATACONSUM.NS",
-    "TATAAML-TATAGOLD": "TATAGOLD.NS",
-    "TATAAML-TATSILV": "TATSILV.NS",
-    "TRENT LTD": "TRENT.NS",
+
+CSS = """
+<style>
+.dash-wrap { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+.section-box {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin-bottom: 22px;
 }
+.section-head { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.section-title { font-size: 17px; font-weight: 700; color:#111827; }
+.section-pill { font-size: 12px; font-weight:600; padding: 4px 12px; border-radius: 14px; color:white; }
+.pill-bull { background:#16a34a; }
+.pill-weak { background:#dc2626; }
 
-PERIOD_OPTIONS = {
-    "1 Month": "1mo",
-    "3 Months": "3mo",
-    "6 Months": "6mo",
-    "1 Year": "1y",
-    "2 Years": "2y",
-    "5 Years": "5y",
+.card-row { display:flex; gap:16px; flex-wrap:wrap; }
+.card { flex:1; min-width: 220px; border-radius: 12px; padding: 14px 16px; }
+.card-bull { background:#eafaf0; border:1px solid #bfead0; }
+.card-weak { background:#fdecec; border:1px solid #f5c6c6; }
+
+.card-name { font-size: 15px; font-weight:700; color:#111827; }
+.card-sub { font-size: 12px; color:#6b7280; margin-bottom:8px; }
+.card-metric { display:flex; justify-content:space-between; font-size:13px; color:#374151; padding:2px 0; }
+.card-metric b { color:#111827; }
+
+.badge { display:inline-block; margin-top:10px; font-size:12px; font-weight:700; padding:5px 10px; border-radius: 8px; }
+.badge-strong { background:#16a34a; color:white; }
+.badge-watch { background:#f59e0b; color:white; }
+.badge-weak { background:#dc2626; color:white; }
+
+table.dash-table { width:100%; table-layout:fixed; border-collapse: collapse; font-size: 13px; background:white; border-radius: 10px; overflow:hidden;}
+table.dash-table thead th {
+    background:#12121f; color:#ffffff; text-transform:uppercase; font-size:11px;
+    letter-spacing: 0.03em; padding: 10px 12px; text-align:left; font-weight:600;
 }
+table.dash-table td { padding: 9px 8px; border-bottom: 1px solid #f0f1f3; vertical-align: middle; }
+table.dash-table tr.block-start td { border-top: 2px solid #d1d5db; }
+
+.stock-name { font-weight:700; color:#111827; font-size:13px; }
+.chart-link { display:inline-block; margin-top:6px; font-size:11px; font-weight:600; color:#2563eb; text-decoration:none; }
+.chart-link:hover { text-decoration:underline; }
+.price-cur { font-weight:700; color:#111827; font-size:14px; }
+.price-sub { font-size:11px; color:#6b7280; }
+.price-sub b { color:#111827; }
+.price-lo { color:#dc2626 !important; font-weight:600; }
+.price-chg { font-size:12px; font-weight:700; margin-top:2px; }
+.price-chg-up { color:#16a34a; }
+.price-chg-down { color:#dc2626; }
+
+.pct-wrap { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+.pct-num { font-weight:700; font-size:14px; }
+.pct-bar-bg { width:68px; height:6px; background:#e5e7eb; border-radius:4px; overflow:hidden; }
+.pct-bar-fill { height:100%; border-radius:4px; }
+.pct-caption { font-size:10px; color:#9ca3af; }
+
+.rsi-cell { display:flex; align-items:center; gap:8px; }
+.rsi-num { font-weight:700; font-size:13px; width:34px; }
+.rsi-bar-bg { flex:1; max-width:80px; height:6px; background:#e5e7eb; border-radius:4px; overflow:hidden; }
+.rsi-bar-fill { height:100%; border-radius:4px; }
+
+.macd-pill { display:inline-block; font-size:11px; font-weight:700; padding:3px 10px; border-radius:12px; }
+.macd-above { background:#e8f8ee; color:#16a34a; }
+.macd-below { background:#fdecec; color:#dc2626; }
+
+.vol-cell { font-size:12px; color:#374151; }
+.vol-up { color:#16a34a; font-weight:600; }
+.vol-down { color:#dc2626; font-weight:600; }
+
+.day-chg-num { font-size:16px; font-weight:700; }
+.day-chg-sub { font-size:12px; font-weight:600; margin-top:2px; }
+.day-chg-label { font-size:10px; color:#9ca3af; margin-top:2px; }
+
+.timeframe-lbl { font-weight:600; color:#374151; }
+.no-data { color:#9ca3af; font-style: italic; padding: 14px; }
+</style>
+"""
+
+
+def render_html(html: str) -> None:
+    """
+    Render raw HTML via st.markdown safely.
+
+    Streamlit's markdown parser follows standard Markdown rules, where any
+    line indented by 4+ spaces is treated as a literal code block. Since our
+    HTML builder functions use indentation for readability, we strip leading
+    whitespace from every line (and collapse blank lines) before handing the
+    string to st.markdown, so it always renders as real HTML instead of text.
+    """
+    cleaned = "\n".join(line.strip() for line in html.splitlines())
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+    st.markdown(cleaned, unsafe_allow_html=True)
+
+
+def color_for_rsi(rsi: float) -> str:
+    if rsi is None or np.isnan(rsi):
+        return "#9ca3af"
+    if rsi >= BULLISH_RSI:
+        return "#16a34a"
+    if rsi < WEAK_RSI:
+        return "#dc2626"
+    return "#2563eb"
+
+
+def color_for_pct(pct: float) -> str:
+    if pct is None or np.isnan(pct):
+        return "#9ca3af"
+    if pct >= 85:
+        return "#16a34a"
+    if pct >= 65:
+        return "#f59e0b"
+    return "#dc2626"
+
+
+def macd_pill(above) -> str:
+    if above is None:
+        return '<span class="macd-pill" style="background:#f3f4f6;color:#9ca3af;">N/A</span>'
+    if above:
+        return '<span class="macd-pill macd-above">&#8593; Above</span>'
+    return '<span class="macd-pill macd-below">&#8595; Below</span>'
+
+
+def build_card(stock: dict, kind: str) -> str:
+    tf = stock["tf"]
+    rows = ""
+    for label in ["Daily", "Weekly", "Monthly"]:
+        rsi = tf[label]["rsi"]
+        rows += f'<div class="card-metric"><span>{label} RSI</span><b>{rsi:.2f}</b></div>'
+    macd_all_above = all(tf[t]["macd_above"] for t in tf)
+    macd_wm_above = tf["Weekly"]["macd_above"] and tf["Monthly"]["macd_above"]
+
+    if kind == "bullish":
+        if all(tf[t]["rsi"] > BULLISH_RSI and tf[t]["macd_above"] for t in ["Daily", "Weekly", "Monthly"]):
+            macd_txt, badge = "Above all 3", '<span class="badge badge-strong">&#9650; Strong Buy Signal</span>'
+        else:
+            macd_txt, badge = ("Above W+M" if macd_wm_above else "Mixed"), '<span class="badge badge-watch">&#9651; Watch</span>'
+        card_class = "card-bull"
+    else:
+        macd_txt = "Below"
+        badge = '<span class="badge badge-weak">&#9660; Weak</span>'
+        card_class = "card-weak"
+
+    pct = stock["pct_of_high"]
+    return f"""
+    <div class="card {card_class}">
+        <div class="card-name">{stock['name']}</div>
+        <div class="card-sub">&#8377;{stock['price']:,.0f} &nbsp;|&nbsp; {pct:.0f}% of 52W High &nbsp;|&nbsp; <span class="{'price-chg-up' if stock['day_change_pct']>=0 else 'price-chg-down'}">{'&#9650;' if stock['day_change_pct']>=0 else '&#9660;'} {abs(stock['day_change_pct']):.2f}%</span></div>
+        {rows}
+        <div class="card-metric"><span>MACD</span><b>{macd_txt}</b></div>
+        {badge}
+    </div>
+    """
+
+
+def build_highlight_sections(stocks: list[dict]) -> str:
+    bullish = [s for s in stocks if classify(s) in ("bullish", "watch")]
+    weak = [s for s in stocks if classify(s) == "weak"]
+
+    bullish_sorted = sorted(bullish, key=lambda s: classify(s) != "bullish")  # fully bullish first
+    html = ""
+
+    if bullish_sorted:
+        cards = "".join(build_card(s, "bullish") for s in bullish_sorted[:6])
+        html += f"""
+        <div class="section-box">
+            <div class="section-head">
+                <span class="section-title">&#9650; Fully Bullish</span>
+                <span class="section-pill pill-bull">RSI &gt;60 + MACD Above Signal on ALL 3 Timeframes</span>
+            </div>
+            <div class="card-row">{cards}</div>
+        </div>"""
+    if weak:
+        cards = "".join(build_card(s, "weak") for s in weak[:6])
+        html += f"""
+        <div class="section-box">
+            <div class="section-head">
+                <span class="section-title">&#9660; Weak / Oversold</span>
+                <span class="section-pill pill-weak">RSI &lt;40 on Daily + MACD Below Signal</span>
+            </div>
+            <div class="card-row">{cards}</div>
+        </div>"""
+    if not bullish_sorted and not weak:
+        html += '<div class="section-box"><div class="no-data">No stocks currently meet the Bullish or Weak criteria for this watchlist.</div></div>'
+    return html
+
+
+def build_table(stocks: list[dict]) -> str:
+    rows_html = ""
+    for stock in stocks:
+        pct = stock["pct_of_high"]
+        pct_color = color_for_pct(pct)
+        price_block = f"""
+        <td rowspan="3">
+            <div class="stock-name">{stock['name']}</div>
+            <a class="chart-link" href="/Chart_View?ticker={quote(stock['ticker'])}&name={quote(stock['name'])}" target="_blank">&#128202; View Chart &#8599;</a>
+        </td>
+        <td rowspan="3">
+            <div class="price-cur">Current {stock['price']:,.0f}</div>
+            <div class="price-sub">52W Hi <b>{stock['high_52w']:,.0f}</b></div>
+            <div class="price-sub">52W Lo <span class="price-lo">{stock['low_52w']:,.0f}</span></div>
+            <div class="vol-cell {'vol-up' if stock['vol_ratio']>=100 else 'vol-down'}">Vol: {stock['vol_ratio']:.0f}% of 20D avg</div>
+        </td>
+        <td rowspan="3">
+            <div class="pct-wrap">
+                <div class="pct-num" style="color:{pct_color};">{pct:.0f}%</div>
+                <div class="pct-bar-bg"><div class="pct-bar-fill" style="width:{min(pct,100)}%; background:{pct_color};"></div></div>
+                <div class="pct-caption">of 52W High</div>
+            </div>
+        </td>
+        <td rowspan="3">
+            <div class="day-chg-num {'price-chg-up' if stock['day_change_pct']>=0 else 'price-chg-down'}">{'&#9650;' if stock['day_change_pct']>=0 else '&#9660;'} {abs(stock['day_change_pct']):.2f}%</div>
+            <div class="day-chg-sub {'price-chg-up' if stock['day_change_abs']>=0 else 'price-chg-down'}">{'+' if stock['day_change_abs']>=0 else ''}{stock['day_change_abs']:,.2f}</div>
+            <div class="day-chg-label">vs prev day close</div>
+        </td>
+        """
+        first = True
+        for label in ["Daily", "Weekly", "Monthly"]:
+            rsi = stock["tf"][label]["rsi"]
+            above = stock["tf"][label]["macd_above"]
+            rsi_color = color_for_rsi(rsi)
+            row_cls = "block-start" if first else ""
+            rsi_bar_pct = 0 if (rsi is None or np.isnan(rsi)) else min(max(rsi, 0), 100)
+            row = f'<tr class="{row_cls}">'
+            if first:
+                row += price_block
+            row += f"""
+                <td><span class="timeframe-lbl">{label}</span></td>
+                <td>
+                    <div class="rsi-cell">
+                        <span class="rsi-num" style="color:{rsi_color};">{rsi:.2f}</span>
+                        <div class="rsi-bar-bg"><div class="rsi-bar-fill" style="width:{rsi_bar_pct}%; background:{rsi_color};"></div></div>
+                    </div>
+                </td>
+                <td>{macd_pill(above)}</td>
+            </tr>"""
+            rows_html += row
+            first = False
+
+    return f"""
+    <div class="section-box" style="padding:0; overflow-x:auto; -webkit-overflow-scrolling:touch;">
+    <table class="dash-table">
+        <colgroup>
+            <col style="width:13%;">
+            <col style="width:15%;">
+            <col style="width:12%;">
+            <col style="width:12%;">
+            <col style="width:9%;">
+            <col style="width:22%;">
+            <col style="width:17%;">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>Stock</th>
+                <th>Price (&#8377;)</th>
+                <th>% of 52W High</th>
+                <th>Day Change</th>
+                <th>Timeframe</th>
+                <th>RSI</th>
+                <th>MACD Position</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows_html}
+        </tbody>
+    </table>
+    </div>
+    """
+
 
 # --------------------------------------------------------------------------
-# Indicator calculations
+# APP
 # --------------------------------------------------------------------------
-def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
 
 
-def compute_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
+def main():
+    render_html(CSS)
 
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        st.caption("Data source: Yahoo Finance (yfinance), free tier — typically ~15 min delayed for NSE.")
 
-@st.cache_data(ttl=900)
-def load_data(ticker: str, period: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.dropna()
-    return df
+        tickers_text = st.text_area(
+            "Watchlist (NSE ticker : Display name — one per line)",
+            value="\n".join(f"{t} : {n}" for t, n in DEFAULT_WATCHLIST),
+            height=220,
+        )
+        watchlist = []
+        for line in tickers_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if ":" in line:
+                t, n = line.split(":", 1)
+                watchlist.append((t.strip(), n.strip()))
+            else:
+                watchlist.append((line, line.replace(".NS", "")))
 
+        if st.button("🔄 Force refresh (clear cache)"):
+            st.cache_data.clear()
+            st.rerun()
 
-def get_signal(rsi_val: float, macd_val: float, signal_val: float, rsi_buy: int, rsi_sell: int) -> str:
-    macd_bullish = macd_val > signal_val
-    if rsi_val < rsi_buy and macd_bullish:
-        return "BUY"
-    if rsi_val > rsi_sell and not macd_bullish:
-        return "SELL"
-    return "HOLD"
+        st.caption(f"Last loaded: {dt.datetime.now(IST).strftime('%d %b %Y, %H:%M:%S')} IST")
 
+    fetch_timestamp = dt.datetime.now(IST).strftime("%d %b %Y, %H:%M:%S") + " IST"
 
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
-st.sidebar.title("📈 DK Groww")
-st.sidebar.caption("RSI + MACD Technical Dashboard")
-
-st.sidebar.markdown("### Select Stock")
-pick_mode = st.sidebar.radio("Pick from list or type your own", ["Watchlist", "Custom ticker"], horizontal=True)
-
-if pick_mode == "Watchlist":
-    display_name = st.sidebar.selectbox("Stock / ETF", list(WATCHLIST.keys()))
-    ticker = WATCHLIST[display_name]
-else:
-    display_name = st.sidebar.text_input("Enter NSE symbol (e.g. WIPRO)", value="WIPRO").strip().upper()
-    ticker = f"{display_name}.NS" if display_name and not display_name.endswith((".NS", ".BO")) else display_name
-
-st.sidebar.markdown("### Time Range")
-period_label = st.sidebar.selectbox("Period", list(PERIOD_OPTIONS.keys()), index=3)
-period = PERIOD_OPTIONS[period_label]
-
-st.sidebar.markdown("### RSI Settings")
-rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
-rsi_buy_level = st.sidebar.slider("Oversold (Buy below)", 10, 40, 30)
-rsi_sell_level = st.sidebar.slider("Overbought (Sell above)", 60, 90, 70)
-
-st.sidebar.markdown("### MACD Settings")
-macd_fast = st.sidebar.slider("Fast EMA", 5, 20, 12)
-macd_slow = st.sidebar.slider("Slow EMA", 15, 40, 26)
-macd_signal_span = st.sidebar.slider("Signal EMA", 5, 15, 9)
-
-st.sidebar.markdown("---")
-st.sidebar.caption("Data via Yahoo Finance. For educational purposes only — not investment advice.")
-
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
-st.title("📈 DK Groww")
-st.caption(f"Technical analysis for **{display_name}** ({ticker})")
-
-if not ticker:
-    st.warning("Please select or enter a stock ticker.")
-    st.stop()
-
-try:
-    data = load_data(ticker, period)
-except Exception as e:
-    st.error(f"Could not fetch data for {ticker}: {e}")
-    st.stop()
-
-if data.empty or len(data) < 30:
-    st.error(f"No sufficient data found for '{ticker}'. Check the symbol and try again.")
-    st.stop()
-
-close = data["Close"]
-data["RSI"] = compute_rsi(close, rsi_period)
-data["MACD"], data["MACD_Signal"], data["MACD_Hist"] = compute_macd(
-    close, macd_fast, macd_slow, macd_signal_span
-)
-
-latest = data.iloc[-1]
-prev = data.iloc[-2]
-price_change = latest["Close"] - prev["Close"]
-price_change_pct = (price_change / prev["Close"]) * 100
-signal = get_signal(latest["RSI"], latest["MACD"], latest["MACD_Signal"], rsi_buy_level, rsi_sell_level)
-
-# ---- Top metrics row ----
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Last Price", f"₹{latest['Close']:.2f}", f"{price_change:+.2f} ({price_change_pct:+.2f}%)")
-col2.metric("52W High", f"₹{data['High'].max():.2f}")
-col3.metric("52W Low", f"₹{data['Low'].min():.2f}")
-col4.metric("RSI", f"{latest['RSI']:.1f}")
-
-signal_colors = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
-col5.metric("Signal", f"{signal_colors[signal]} {signal}")
-
-st.markdown("---")
-
-# ---- Price chart with candlesticks ----
-fig = make_subplots(
-    rows=3,
-    cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.04,
-    row_heights=[0.5, 0.25, 0.25],
-    subplot_titles=("Price", "RSI", "MACD"),
-)
-
-fig.add_trace(
-    go.Candlestick(
-        x=data.index,
-        open=data["Open"],
-        high=data["High"],
-        low=data["Low"],
-        close=data["Close"],
-        name="Price",
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350",
-    ),
-    row=1,
-    col=1,
-)
-
-ema20 = close.ewm(span=20, adjust=False).mean()
-ema50 = close.ewm(span=50, adjust=False).mean()
-fig.add_trace(go.Scatter(x=data.index, y=ema20, name="EMA 20", line=dict(color="#f0a500", width=1)), row=1, col=1)
-fig.add_trace(go.Scatter(x=data.index, y=ema50, name="EMA 50", line=dict(color="#7e57c2", width=1)), row=1, col=1)
-
-# RSI
-fig.add_trace(go.Scatter(x=data.index, y=data["RSI"], name="RSI", line=dict(color="#2196f3", width=1.5)), row=2, col=1)
-fig.add_hline(y=rsi_sell_level, line_dash="dash", line_color="#ef5350", row=2, col=1)
-fig.add_hline(y=rsi_buy_level, line_dash="dash", line_color="#26a69a", row=2, col=1)
-fig.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
-
-# MACD
-colors = ["#26a69a" if v >= 0 else "#ef5350" for v in data["MACD_Hist"]]
-fig.add_trace(go.Bar(x=data.index, y=data["MACD_Hist"], name="Histogram", marker_color=colors), row=3, col=1)
-fig.add_trace(go.Scatter(x=data.index, y=data["MACD"], name="MACD", line=dict(color="#2196f3", width=1.5)), row=3, col=1)
-fig.add_trace(go.Scatter(x=data.index, y=data["MACD_Signal"], name="Signal", line=dict(color="#f0a500", width=1.5)), row=3, col=1)
-
-fig.update_layout(
-    height=850,
-    showlegend=True,
-    xaxis_rangeslider_visible=False,
-    margin=dict(l=10, r=10, t=40, b=10),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# ---- Signal explanation ----
-with st.expander("How is the signal calculated?"):
-    st.markdown(
+    render_html(
         f"""
-        - **RSI({rsi_period})** below **{rsi_buy_level}** = oversold; above **{rsi_sell_level}** = overbought.
-        - **MACD** bullish when the MACD line is above its signal line, bearish when below.
-        - **BUY** → RSI oversold **and** MACD bullish.
-        - **SELL** → RSI overbought **and** MACD bearish.
-        - Otherwise → **HOLD**.
-
-        Current readings: RSI = **{latest['RSI']:.1f}**, MACD = **{latest['MACD']:.2f}**, Signal = **{latest['MACD_Signal']:.2f}**.
+        <div class="dash-wrap">
+        <h1 style="margin-bottom:2px;">My HDFC Stocks — RSI + MACD Dashboard</h1>
+        <p style="color:#6b7280; margin-top:0;">RSI (14, Wilder's EWM) &middot; MACD (12,26,9) &middot; Daily / Weekly / Monthly &middot; NSE</p>
+        <p style="color:#111827; margin-top:0; font-size:13px; font-weight:600;">&#128337; Data pulled: {fetch_timestamp}</p>
+        </div>
         """
     )
 
-# ---- Raw data ----
-with st.expander("View raw data"):
-    st.dataframe(data.tail(100).sort_index(ascending=False), use_container_width=True)
+    stocks = []
+    progress = st.progress(0.0, text="Fetching live data...")
+    failed = []
+    for i, (ticker, name) in enumerate(watchlist):
+        try:
+            result = analyze_ticker(ticker, name)
+            if result:
+                stocks.append(result)
+            else:
+                failed.append(ticker)
+        except Exception:
+            failed.append(ticker)
+        progress.progress((i + 1) / max(len(watchlist), 1), text=f"Fetching {name}...")
+    progress.empty()
 
-st.markdown("---")
-st.caption("DK Groww · Data sourced from Yahoo Finance via yfinance · Not financial advice.")
+    if failed:
+        st.warning(f"Could not fetch data for: {', '.join(failed)}. Check the ticker symbols (must end in .NS for NSE).")
+
+    if not stocks:
+        st.error("No data available. Please check your internet connection and ticker symbols.")
+        return
+
+    render_html(build_highlight_sections(stocks))
+
+    if "sort_col" not in st.session_state:
+        st.session_state.sort_col = "pct_of_high"
+        st.session_state.sort_dir = "desc"
+
+    def toggle_sort(col: str):
+        if st.session_state.sort_col == col:
+            st.session_state.sort_dir = "asc" if st.session_state.sort_dir == "desc" else "desc"
+        else:
+            st.session_state.sort_col = col
+            st.session_state.sort_dir = "desc"
+
+    def arrow(col: str) -> str:
+        if st.session_state.sort_col != col:
+            return "⇅"
+        return "▲" if st.session_state.sort_dir == "asc" else "▼"
+
+    sort_cols = st.columns([2, 2, 2, 2, 1.3, 1.5, 1.5])
+    with sort_cols[0]:
+        st.button(f"Sort: Stock {arrow('name')}", key="sort_btn_stock", on_click=toggle_sort, args=("name",), use_container_width=True)
+    with sort_cols[2]:
+        st.button(f"Sort: % of 52W High {arrow('pct_of_high')}", key="sort_btn_pct", on_click=toggle_sort, args=("pct_of_high",), use_container_width=True)
+    with sort_cols[3]:
+        st.button(f"Sort: Day Change {arrow('day_change')}", key="sort_btn_daychange", on_click=toggle_sort, args=("day_change",), use_container_width=True)
+
+    reverse = st.session_state.sort_dir == "desc"
+    sort_col = st.session_state.sort_col
+    if sort_col == "name":
+        table_stocks = sorted(stocks, key=lambda s: s["name"].lower(), reverse=reverse)
+    elif sort_col == "day_change":
+        table_stocks = sorted(stocks, key=lambda s: s["day_change_pct"], reverse=reverse)
+    else:
+        table_stocks = sorted(
+            stocks,
+            key=lambda s: s["pct_of_high"] if not np.isnan(s["pct_of_high"]) else -1,
+            reverse=reverse,
+        )
+    render_html(build_table(table_stocks))
+
+    st.caption(
+        "Data refreshes automatically every 5 minutes, or click 'Force refresh' in the sidebar for the latest values. "
+        "This dashboard is for informational purposes only and is not investment advice."
+    )
+
+
+if __name__ == "__main__":
+    main()
