@@ -38,23 +38,21 @@ WEAK_RSI = 40
 
 # Default watchlist -> (NSE ticker, Display name)
 DEFAULT_WATCHLIST = [
- ("ADANIENT.NS", "ADANIENT"),
- ("GAIL.NS", "GAIL"),
-("HDFCBANK.NS", "HDFCBANK"),
-("ICICIBANK.NS", "ICICIBANK"),
-("IOC.NS", "IOC"),
-("INDIGO.NS", "INDIGO"),
-("ITC.NS", "ITC"),
-("LT.NS", "LT"),
-("MON100.NS", "MON100"),
-("GOLDBEES.NS", "GOLDBEES"),
-("RELIANCE.NS", "RELIANCE"),
-("SBISILVER.NS", "SBISILVER"),
-("TATACONSUM.NS", "TATACONSUM"),
-("TATAGOLD.NS", "TATAGOLD"),
-("TATSILV.NS", "TATSILV"),
-("TRENT.NS", "TRENT"),
-("YESBANK.NS", "YESBANK"),
+    ("GAIL.NS", "GAIL"),
+    ("HDFCBANK.NS", "HDFCBANK"),
+    ("ICICIBANK.NS", "ICICIBANK"),
+    ("IOC.NS", "IOC"),
+    ("INDIGO.NS", "INDIGO"),
+    ("ITC.NS", "ITC"),
+    ("LT.NS", "LT"),
+    ("MON100.NS", "MON100"),
+    ("GOLDBEES.NS", "GOLDBEES"),
+    ("RELIANCE.NS", "RELIANCE"),
+    ("SBISILVER.NS", "SBISILVER"),
+    ("TATACONSUM.NS", "TATACONSUM"),
+    ("TATAGOLD.NS", "TATAGOLD"),
+    ("TATSILV.NS", "TATSILV"),
+    ("TRENT.NS", "TRENT"),
 ]
 
 # NOTE: rsi_wilder, macd_lines, fetch_daily, and resample_ohlc now live in
@@ -172,12 +170,12 @@ CSS = """
 .badge-watch { background:#f59e0b; color:white; }
 .badge-weak { background:#dc2626; color:white; }
 
-table.dash-table { width:100%; table-layout:fixed; border-collapse: collapse; font-size: 13px; background:white; border-radius: 10px; overflow:hidden;}
+table.dash-table { width:100%; min-width:900px; border-collapse: collapse; font-size: 13px; background:white; border-radius: 10px; overflow:hidden;}
 table.dash-table thead th {
     background:#12121f; color:#ffffff; text-transform:uppercase; font-size:11px;
     letter-spacing: 0.03em; padding: 10px 12px; text-align:left; font-weight:600;
 }
-table.dash-table td { padding: 9px 8px; border-bottom: 1px solid #f0f1f3; vertical-align: middle; }
+table.dash-table td { padding: 9px 12px; border-bottom: 1px solid #f0f1f3; vertical-align: middle; }
 table.dash-table tr.block-start td { border-top: 2px solid #d1d5db; }
 
 .stock-name { font-weight:700; color:#111827; font-size:13px; }
@@ -193,7 +191,7 @@ table.dash-table tr.block-start td { border-top: 2px solid #d1d5db; }
 
 .pct-wrap { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
 .pct-num { font-weight:700; font-size:14px; }
-.pct-bar-bg { width:68px; height:6px; background:#e5e7eb; border-radius:4px; overflow:hidden; }
+.pct-bar-bg { width:90px; height:6px; background:#e5e7eb; border-radius:4px; overflow:hidden; }
 .pct-bar-fill { height:100%; border-radius:4px; }
 .pct-caption { font-size:10px; color:#9ca3af; }
 
@@ -382,15 +380,6 @@ def build_table(stocks: list[dict]) -> str:
     return f"""
     <div class="section-box" style="padding:0; overflow-x:auto; -webkit-overflow-scrolling:touch;">
     <table class="dash-table">
-        <colgroup>
-            <col style="width:13%;">
-            <col style="width:15%;">
-            <col style="width:12%;">
-            <col style="width:12%;">
-            <col style="width:9%;">
-            <col style="width:22%;">
-            <col style="width:17%;">
-        </colgroup>
         <thead>
             <tr>
                 <th>Stock</th>
@@ -449,7 +438,7 @@ def main():
     render_html(
         f"""
         <div class="dash-wrap">
-        <h1 style="margin-bottom:2px;">My HDFC Stocks — RSI + MACD Dashboard</h1>
+        <h1 style="margin-bottom:2px;">DK Groww — RSI + MACD Dashboard</h1>
         <p style="color:#6b7280; margin-top:0;">RSI (14, Wilder's EWM) &middot; MACD (12,26,9) &middot; Daily / Weekly / Monthly &middot; NSE</p>
         <p style="color:#111827; margin-top:0; font-size:13px; font-weight:600;">&#128337; Data pulled: {fetch_timestamp}</p>
         </div>
